@@ -56,7 +56,7 @@ jobs:
         # .env, uploaded papers and node_modules stay on the server; public/ belongs to the frontend repo.
         run: |
           rsync -az --delete \
-            --exclude '.env' --exclude 'storage/' --exclude 'node_modules/' --exclude 'tmp/' --exclude 'public/' \
+            --exclude '.env' --exclude 'storage/' --exclude 'node_modules' --exclude 'tmp/' --exclude 'public/' \
             -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || 22 }}" \
             release/ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.APP_DIR }}/"
 
@@ -67,7 +67,11 @@ jobs:
           ${{ secrets.NODE_ACTIVATE }}
           cd "${{ secrets.APP_DIR }}"
           mkdir -p storage/papers tmp
-          npm ci --omit=dev
+          # cPanel keeps node_modules as a link into the app's virtual environment; recreate it if missing.
+          VENV_MODULES="$(dirname "$(dirname "$(command -v node)")")/lib/node_modules"
+          mkdir -p "$VENV_MODULES"
+          [ -e node_modules ] || ln -s "$VENV_MODULES" node_modules
+          npm install --omit=dev --no-audit --no-fund
           node migrate.js
           touch tmp/restart.txt
           REMOTE
