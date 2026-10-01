@@ -45,7 +45,7 @@ async function createToken({ order, description, appUrl }) {
   return {
     token: String(r.TransToken),
     ref: String(r.TransRef),
-    payUrl: `${process.env.DPO_PAY_URL || 'https://secure.3gdirectpay.com/payv2.php'}?ID=${r.TransToken}`,
+    payUrl: `${process.env.DPO_PAY_URL || 'https://secure.3gdirectpay.com/payv3.php'}?ID=${r.TransToken}`,
   };
 }
 
