@@ -1,0 +1,79 @@
+name: Deploy backend to cPanel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Syntax check
+        run: for f in app.js seed.js migrate.js src/*.js src/routes/*.js; do node --check "$f"; done
+      - name: Assemble release folder
+        run: |
+          mkdir release
+          cp -r app.js seed.js migrate.js package.json package-lock.json src database release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production   # optionally require a reviewer to approve deploys (Settings > Environments)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Upload files (rsync)
+        # .env, uploaded papers and node_modules stay on the server; public/ belongs to the frontend repo.
+        run: |
+          rsync -az --delete \
+            --exclude '.env' --exclude 'storage/' --exclude 'node_modules/' --exclude 'tmp/' --exclude 'public/' \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || 22 }}" \
+            release/ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.APP_DIR }}/"
+
+      - name: Install dependencies, migrate database, restart app
+        run: |
+          ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || 22 }} "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" bash -se <<'REMOTE'
+          set -euo pipefail
+          ${{ secrets.NODE_ACTIVATE }}
+          cd "${{ secrets.APP_DIR }}"
+          mkdir -p storage/papers tmp
+          npm ci --omit=dev
+          node migrate.js
+          touch tmp/restart.txt
+          REMOTE
+
+      - name: Smoke test
+        if: ${{ vars.SITE_URL != '' }}
+        run: |
+          sleep 8
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 "${{ vars.SITE_URL }}/api/catalog/qualifications" > /dev/null
