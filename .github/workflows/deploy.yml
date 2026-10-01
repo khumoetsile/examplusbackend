@@ -63,7 +63,7 @@ jobs:
       - name: Install dependencies, migrate database, restart app
         run: |
           ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || 22 }} "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" bash -se <<'REMOTE'
-          set -euo pipefail
+          set -eo pipefail
           ${{ secrets.NODE_ACTIVATE }}
           cd "${{ secrets.APP_DIR }}"
           mkdir -p storage/papers tmp
