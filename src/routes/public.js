@@ -8,6 +8,7 @@ const { hasPaperAccess, listEntitlements } = require('../access');
 const dpo = require('../dpo');
 const rateLimit = require('express-rate-limit');
 const { coverFor } = require('../cover');
+const render = require('../render');
 const { cur, priceCols, money, applyVoucher, markPaid } = require('../orders');
 
 const appUrl = () => (process.env.APP_URL || '').replace(/\/$/, '');
@@ -102,6 +103,13 @@ const coverLimiter = rateLimit({ windowMs: 60 * 1000, limit: 40, standardHeaders
 router.get('/papers/:id/cover', coverLimiter, async (req, res) => {
   const p = await one('SELECT file_name FROM papers WHERE id=? AND active=1', [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Paper not found.' });
+  if (await render.hasGs()) {
+    try {
+      const img = await render.pageImage(p.file_name, 1);
+      res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=600', 'X-Content-Type-Options': 'nosniff' });
+      return fs.createReadStream(img).pipe(res);
+    } catch (e) { console.error('gs cover failed, falling back', e.message); }
+  }
   let file;
   try { file = await coverFor(p.file_name); } catch (e) { console.error('cover failed', e.message); return res.status(500).json({ error: 'Preview is not available for this paper.' }); }
   if (!file) return res.status(404).json({ error: 'Preview is not available for this paper.' });
@@ -297,6 +305,41 @@ router.get('/papers/:id/meta', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin' && !(await hasPaperAccess(req.user.id, p.id)))
     return res.status(403).json({ error: 'You have not purchased this paper.' });
   res.json({ paper: p, viewer: req.user.email });
+});
+
+// Page-image viewing (Ghostscript). The learner's browser only ever receives images of pages they own.
+async function viewablePaper(req, res) {
+  const p = await one('SELECT * FROM papers WHERE id=? AND active=1', [req.params.id]);
+  if (!p) { res.status(404).json({ error: 'Paper not found.' }); return null; }
+  if (req.user.role !== 'admin' && !(await hasPaperAccess(req.user.id, p.id))) {
+    audit(req.user.id, 'paper_denied', p.id);
+    res.status(403).json({ error: 'You have not purchased this paper.' });
+    return null;
+  }
+  return p;
+}
+router.get('/papers/:id/pages', requireAuth, async (req, res) => {
+  const p = await viewablePaper(req, res);
+  if (!p) return;
+  if (!(await render.hasGs())) return res.json({ mode: 'pdf' });
+  try {
+    const count = await render.pageCount(p.file_name);
+    audit(req.user.id, 'paper_view', p.id);
+    res.set('Cache-Control', 'no-store');
+    res.json({ mode: 'images', count });
+  } catch (e) { console.error('page count failed', e.message); res.json({ mode: 'pdf' }); }
+});
+router.get('/papers/:id/page/:n', requireAuth, async (req, res) => {
+  const p = await viewablePaper(req, res);
+  if (!p) return;
+  const n = Number(req.params.n);
+  try {
+    const count = await render.pageCount(p.file_name);
+    if (!Number.isInteger(n) || n < 1 || n > count) return res.status(404).json({ error: 'No such page.' });
+    const img = await render.pageImage(p.file_name, n);
+    res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store, private', 'X-Content-Type-Options': 'nosniff' });
+    fs.createReadStream(img).pipe(res);
+  } catch (e) { console.error('page render failed', e.message); res.status(500).json({ error: 'Could not display this page.' }); }
 });
 
 // The file is streamed only to authorised, signed-in users; it is never a public URL.

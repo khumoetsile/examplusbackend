@@ -7,6 +7,7 @@ const { query, one, audit } = require('../db');
 const { requireAuth, requireAdmin } = require('../auth');
 const { cur } = require('../orders');
 const { removeCover } = require('../cover');
+const { removePages } = require('../render');
 
 router.use(requireAuth, requireAdmin);
 
@@ -81,7 +82,7 @@ const nameFromFile = (n) => n.replace(/\.pdf$/i, '').replace(/[_+-]+/g, ' ').tri
 router.get('/papers', async (_q, res) => res.json(await query(
   `SELECT p.id, p.subject_id, p.exam_year, p.paper_type, p.original_name, p.active, p.created_at,
           s.name AS subject, q.code AS qualification, q.id AS qualification_id,
-          pr.id AS product_id, pr.price, ${cur('pr')} AS current_price
+          pr.id AS product_id, pr.price, pr.access_days, ${cur('pr')} AS current_price
      FROM papers p JOIN subjects s ON s.id=p.subject_id JOIN qualifications q ON q.id=s.qualification_id
      LEFT JOIN products pr ON pr.paper_id=p.id AND pr.type='paper'
     ORDER BY q.sort_order, s.name, p.exam_year DESC, p.paper_type`)));
@@ -121,14 +122,14 @@ router.put('/papers/:id', upload.single('file'), async (req, res) => {
   }
   await query('UPDATE papers SET subject_id=?,exam_year=?,paper_type=?,active=?' + (file ? ',file_name=?,original_name=?' : '') + ' WHERE id=?',
     [subject_id, Number(exam_year), paper_type, flag(active), ...(file ? [file.filename, file.originalname] : []), req.params.id]);
-  if (file) { fs.rm(path.join(dir, path.basename(old.file_name)), () => {}); removeCover(old.file_name); }
+  if (file) { fs.rm(path.join(dir, path.basename(old.file_name)), () => {}); removeCover(old.file_name); removePages(old.file_name); }
   audit(req.user.id, 'admin_paper_update', { id: req.params.id, replaced: !!file });
   res.json({ ok: true });
 });
 router.delete('/papers/:id', async (req, res) => {
   const p = await one('SELECT file_name FROM papers WHERE id=?', [req.params.id]);
   await query('DELETE FROM papers WHERE id=?', [req.params.id]);
-  if (p) { fs.rm(path.join(dir, path.basename(p.file_name)), () => {}); removeCover(p.file_name); }
+  if (p) { fs.rm(path.join(dir, path.basename(p.file_name)), () => {}); removeCover(p.file_name); removePages(p.file_name); }
   audit(req.user.id, 'admin_paper_delete', req.params.id);
   res.json({ ok: true });
 });
@@ -167,10 +168,15 @@ router.put('/products/:id', async (req, res) => {
   audit(req.user.id, 'admin_product_update', { id: req.params.id, price: b.price, sale });
   res.json({ ok: true });
 });
-// Price-only update (used by the papers screen so specials are never overwritten).
+// Price/access-only update (used by the papers screen so specials are never overwritten).
 router.put('/products/:id/price', async (req, res) => {
   const p = Number(req.body.price);
   if (Number.isNaN(p) || p < 0) return bad(res, 'Enter a valid price.');
+  if ('access_days' in req.body) {
+    const d = req.body.access_days === '' || req.body.access_days === null ? null : Number(req.body.access_days);
+    if (d !== null && !(Number.isInteger(d) && d > 0)) return bad(res, 'Access period must be a whole number of days.');
+    await query('UPDATE products SET access_days=? WHERE id=?', [d, req.params.id]);
+  }
   await query('UPDATE products SET price=? WHERE id=?', [p, req.params.id]);
   audit(req.user.id, 'admin_price_update', { id: req.params.id, price: p });
   res.json({ ok: true });
@@ -199,6 +205,24 @@ router.post('/specials', async (req, res) => {
       WHERE pr.price>0 ${where.length ? 'AND ' + where.join(' AND ') : ''}`,
     [pct, dt(starts), dt(ends), label || `${pct}% off`, ...args]);
   audit(req.user.id, 'admin_special_apply', { scope, scope_id, type, pct, changed: r.affectedRows });
+  res.json({ changed: r.affectedRows });
+});
+// Change the access period for a group of products (all / one qualification / one subject, optionally one product type).
+router.post('/access-bulk', async (req, res) => {
+  const { scope, scope_id, type } = req.body;
+  const d = req.body.days === '' || req.body.days === null || req.body.days === undefined ? null : Number(req.body.days);
+  if (d !== null && !(Number.isInteger(d) && d > 0)) return bad(res, 'Choose an access period.');
+  const where = [], args = [];
+  if (scope === 'qualification') {
+    where.push('(pr.qualification_id=? OR pr.subject_id IN (SELECT id FROM subjects WHERE qualification_id=?) OR pr.paper_id IN (SELECT p.id FROM papers p JOIN subjects s ON s.id=p.subject_id WHERE s.qualification_id=?))');
+    args.push(scope_id, scope_id, scope_id);
+  } else if (scope === 'subject') {
+    where.push('(pr.subject_id=? OR pr.paper_id IN (SELECT id FROM papers WHERE subject_id=?))');
+    args.push(scope_id, scope_id);
+  } else if (scope !== 'all') return bad(res, 'Choose where this applies.');
+  if (['paper', 'subject', 'qualification'].includes(type)) { where.push('pr.type=?'); args.push(type); }
+  const r = await query(`UPDATE products pr SET pr.access_days=? ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`, [d, ...args]);
+  audit(req.user.id, 'admin_access_bulk', { scope, scope_id, type, days: d, changed: r.affectedRows });
   res.json({ changed: r.affectedRows });
 });
 router.delete('/specials', async (req, res) => {

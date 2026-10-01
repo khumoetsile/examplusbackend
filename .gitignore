@@ -1,6 +1,8 @@
 node_modules/
 .env
 public/
+storage/*
+!storage/papers/
 storage/papers/*
 !storage/papers/.gitkeep
 tmp/
