@@ -5,7 +5,7 @@ const { grantOrder } = require('./access');
 const cur = (a = 'pr') =>
   `IF(${a}.sale_price IS NOT NULL AND (${a}.sale_starts IS NULL OR ${a}.sale_starts <= NOW()) AND (${a}.sale_ends IS NULL OR ${a}.sale_ends > NOW()), ${a}.sale_price, ${a}.price)`;
 const priceCols = (a = 'pr') =>
-  `${a}.id AS product_id, ${a}.name, ${cur(a)} AS price, ${a}.price AS regular_price, (${cur(a)} < ${a}.price) AS on_sale, ${a}.sale_label, ${a}.sale_ends`;
+  `${a}.id AS product_id, ${a}.name, ${cur(a)} AS price, ${a}.price AS regular_price, (${cur(a)} < ${a}.price) AS on_sale, ${a}.sale_label, ${a}.sale_ends, ${a}.access_days`;
 
 const money = (n) => Math.round(Number(n) * 100) / 100;
 

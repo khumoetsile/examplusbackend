@@ -6,6 +6,8 @@ const { query, one, audit, getCurrency } = require('../db');
 const { sign, requireAuth } = require('../auth');
 const { hasPaperAccess, listEntitlements } = require('../access');
 const dpo = require('../dpo');
+const rateLimit = require('express-rate-limit');
+const { coverFor } = require('../cover');
 const { cur, priceCols, money, applyVoucher, markPaid } = require('../orders');
 
 const appUrl = () => (process.env.APP_URL || '').replace(/\/$/, '');
@@ -52,12 +54,59 @@ router.get('/catalog/qualifications', async (_req, res) => {
   res.json({ currency: await getCurrency(), qualifications: quals });
 });
 
+// Search papers by free text, e.g. "BGCSE Biology 2024". Every word must match the qualification, subject, year or paper name.
 router.get('/catalog/search', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  if (q.length < 2) return res.json([]);
-  res.json(await query(
-    `SELECT s.id, s.name, qu.code AS qualification FROM subjects s JOIN qualifications qu ON qu.id=s.qualification_id
-      WHERE s.active=1 AND qu.active=1 AND (s.name LIKE ? OR qu.code LIKE ?) ORDER BY qu.sort_order, s.name LIMIT 12`, [`%${q}%`, `%${q}%`]));
+  const tokens = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  const qual = String(req.query.qualification || '').trim();
+  const year = Number(req.query.year) || null;
+  const subject = Number(req.query.subject) || null;
+  if (!tokens.length && !qual && !year && !subject) return res.json({ papers: [], subjects: [], currency: await getCurrency() });
+  const where = ['p.active=1', 's.active=1', 'q.active=1'], args = [];
+  for (const t of tokens) {
+    where.push('(q.code LIKE ? OR q.name LIKE ? OR s.name LIKE ? OR p.exam_year LIKE ? OR p.paper_type LIKE ?)');
+    args.push(...Array(5).fill(`%${t}%`));
+  }
+  if (qual) { where.push('q.code=?'); args.push(qual); }
+  if (year) { where.push('p.exam_year=?'); args.push(year); }
+  if (subject) { where.push('s.id=?'); args.push(subject); }
+  const papers = await query(
+    `SELECT p.id, p.exam_year, p.paper_type, s.id AS subject_id, s.name AS subject, q.id AS qualification_id, q.code AS qualification,
+            pr.id AS product_id, ${cur('pr')} AS price, pr.price AS regular_price, (${cur('pr')} < pr.price) AS on_sale, pr.sale_label, pr.access_days
+       FROM papers p JOIN subjects s ON s.id=p.subject_id JOIN qualifications q ON q.id=s.qualification_id
+       LEFT JOIN products pr ON pr.paper_id=p.id AND pr.type='paper' AND pr.active=1 AND pr.price>0
+      WHERE ${where.join(' AND ')} ORDER BY q.sort_order, s.name, p.exam_year DESC, p.paper_type LIMIT 60`, args);
+  if (req.user) {
+    const ents = await listEntitlements(req.user.id);
+    for (const p of papers) p.owned = ents.some((e) =>
+      (e.type === 'paper' && e.paper_id === p.id) || (e.type === 'subject' && e.subject_id === p.subject_id) ||
+      (e.type === 'qualification' && e.qualification_id === p.qualification_id));
+  }
+  let subjects = [];
+  if (!year && tokens.length) {
+    const sw = ['s.active=1', 'q.active=1'], sa = [];
+    for (const t of tokens) { sw.push('(q.code LIKE ? OR q.name LIKE ? OR s.name LIKE ?)'); sa.push(...Array(3).fill(`%${t}%`)); }
+    subjects = await query(
+      `SELECT s.id, s.name, q.code AS qualification FROM subjects s JOIN qualifications q ON q.id=s.qualification_id
+        WHERE ${sw.join(' AND ')} ORDER BY q.sort_order, s.name LIMIT 8`, sa);
+  }
+  res.json({ papers, subjects, currency: await getCurrency() });
+});
+
+// Years that have papers, for the year filter.
+router.get('/catalog/years', async (_req, res) => {
+  res.json((await query('SELECT DISTINCT p.exam_year FROM papers p JOIN subjects s ON s.id=p.subject_id WHERE p.active=1 AND s.active=1 ORDER BY p.exam_year DESC')).map((r) => r.exam_year));
+});
+
+// Cover page (page 1 only) of a paper, so learners can see what they are buying. Public, rate limited.
+const coverLimiter = rateLimit({ windowMs: 60 * 1000, limit: 40, standardHeaders: true, legacyHeaders: false });
+router.get('/papers/:id/cover', coverLimiter, async (req, res) => {
+  const p = await one('SELECT file_name FROM papers WHERE id=? AND active=1', [req.params.id]);
+  if (!p) return res.status(404).json({ error: 'Paper not found.' });
+  let file;
+  try { file = await coverFor(p.file_name); } catch (e) { console.error('cover failed', e.message); return res.status(500).json({ error: 'Preview is not available for this paper.' }); }
+  if (!file) return res.status(404).json({ error: 'Preview is not available for this paper.' });
+  res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': 'inline', 'Cache-Control': 'public, max-age=600', 'X-Content-Type-Options': 'nosniff' });
+  fs.createReadStream(file).pipe(res);
 });
 
 router.get('/catalog/qualifications/:code', async (req, res) => {
@@ -79,7 +128,7 @@ router.get('/catalog/subjects/:id', async (req, res) => {
        FROM subjects s JOIN qualifications q ON q.id=s.qualification_id WHERE s.id=? AND s.active=1`, [req.params.id]);
   if (!s) return res.status(404).json({ error: 'Subject not found.' });
   const papers = await query(
-    `SELECT p.id, p.exam_year, p.paper_type, pr.id AS product_id, ${cur('pr')} AS price, pr.price AS regular_price, (${cur('pr')} < pr.price) AS on_sale, pr.sale_label
+    `SELECT p.id, p.exam_year, p.paper_type, pr.id AS product_id, ${cur('pr')} AS price, pr.price AS regular_price, (${cur('pr')} < pr.price) AS on_sale, pr.sale_label, pr.access_days
        FROM papers p LEFT JOIN products pr ON pr.paper_id=p.id AND pr.type='paper' AND pr.active=1 AND pr.price>0
       WHERE p.subject_id=? AND p.active=1 ORDER BY p.exam_year DESC, p.paper_type`, [s.id]);
   let ents = [];

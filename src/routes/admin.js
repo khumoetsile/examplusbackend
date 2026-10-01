@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { query, one, audit } = require('../db');
 const { requireAuth, requireAdmin } = require('../auth');
 const { cur } = require('../orders');
+const { removeCover } = require('../cover');
 
 router.use(requireAuth, requireAdmin);
 
@@ -19,6 +20,8 @@ const upload = multer({
   limits: { fileSize: 60 * 1024 * 1024 },
 });
 
+// Default access period (days) applied to newly created products; null = lifetime.
+const defaultDays = async () => { const v = (await one("SELECT v FROM settings WHERE k='default_access_days'"))?.v; return v ? Number(v) : null; };
 const bad = (res, msg) => res.status(400).json({ error: msg });
 const flag = (v) => (v === false || v === 0 || v === '0' || v === 'false' ? 0 : 1);
 
@@ -29,7 +32,7 @@ router.post('/qualifications', async (req, res) => {
   if (!code?.trim() || !name?.trim()) return bad(res, 'Code and name are required.');
   const r = await query('INSERT INTO qualifications (code,name,description,sort_order) VALUES (?,?,?,?)',
     [code.trim().toUpperCase(), name.trim(), description || null, Number(sort_order) || 0]);
-  await query("INSERT INTO products (type,qualification_id,name,price) VALUES ('qualification',?,?,0)", [r.insertId, `${code.trim().toUpperCase()} - Complete (All Papers)`]);
+  await query("INSERT INTO products (type,qualification_id,name,price,access_days) VALUES ('qualification',?,?,0,?)", [r.insertId, `${code.trim().toUpperCase()} - Complete (All Papers)`, await defaultDays()]);
   audit(req.user.id, 'admin_qualification_create', code);
   res.json({ id: r.insertId });
 });
@@ -54,7 +57,7 @@ router.post('/subjects', async (req, res) => {
   if (!qualification_id || !name?.trim()) return bad(res, 'Qualification and name are required.');
   const r = await query('INSERT INTO subjects (qualification_id,name) VALUES (?,?)', [qualification_id, name.trim()]);
   const q = await one('SELECT code FROM qualifications WHERE id=?', [qualification_id]);
-  await query("INSERT INTO products (type,subject_id,name,price) VALUES ('subject',?,?,0)", [r.insertId, `${q?.code || ''} ${name.trim()} - Complete Collection`]);
+  await query("INSERT INTO products (type,subject_id,name,price,access_days) VALUES ('subject',?,?,0,?)", [r.insertId, `${q?.code || ''} ${name.trim()} - Complete Collection`, await defaultDays()]);
   res.json({ id: r.insertId });
 });
 router.put('/subjects/:id', async (req, res) => {
@@ -93,12 +96,13 @@ router.post('/papers', (req, res, next) => uploadMany(req, res, (e) => (e ? next
   const subject = await one('SELECT s.name, q.code FROM subjects s JOIN qualifications q ON q.id=s.qualification_id WHERE s.id=?', [subject_id]);
   if (!subject) { cleanup(); return bad(res, 'Unknown subject.'); }
   const ids = [];
+  const days = await defaultDays();
   for (const f of files) {
     const type = (files.length === 1 && paper_type?.trim()) || nameFromFile(f.originalname) || 'Paper 1';
     const r = await query('INSERT INTO papers (subject_id,exam_year,paper_type,file_name,original_name) VALUES (?,?,?,?,?)',
       [subject_id, Number(exam_year), type, f.filename, f.originalname]);
-    await query("INSERT INTO products (type,paper_id,name,price) VALUES ('paper',?,?,?)",
-      [r.insertId, `${subject.code} ${subject.name} ${exam_year} ${type}`, Number(price) || 0]);
+    await query("INSERT INTO products (type,paper_id,name,price,access_days) VALUES ('paper',?,?,?,?)",
+      [r.insertId, `${subject.code} ${subject.name} ${exam_year} ${type}`, Number(price) || 0, days]);
     ids.push(r.insertId);
   }
   audit(req.user.id, 'admin_paper_upload', { ids });
@@ -117,14 +121,14 @@ router.put('/papers/:id', upload.single('file'), async (req, res) => {
   }
   await query('UPDATE papers SET subject_id=?,exam_year=?,paper_type=?,active=?' + (file ? ',file_name=?,original_name=?' : '') + ' WHERE id=?',
     [subject_id, Number(exam_year), paper_type, flag(active), ...(file ? [file.filename, file.originalname] : []), req.params.id]);
-  if (file) fs.rm(path.join(dir, path.basename(old.file_name)), () => {});
+  if (file) { fs.rm(path.join(dir, path.basename(old.file_name)), () => {}); removeCover(old.file_name); }
   audit(req.user.id, 'admin_paper_update', { id: req.params.id, replaced: !!file });
   res.json({ ok: true });
 });
 router.delete('/papers/:id', async (req, res) => {
   const p = await one('SELECT file_name FROM papers WHERE id=?', [req.params.id]);
   await query('DELETE FROM papers WHERE id=?', [req.params.id]);
-  if (p) fs.rm(path.join(dir, path.basename(p.file_name)), () => {});
+  if (p) { fs.rm(path.join(dir, path.basename(p.file_name)), () => {}); removeCover(p.file_name); }
   audit(req.user.id, 'admin_paper_delete', req.params.id);
   res.json({ ok: true });
 });
@@ -284,10 +288,27 @@ router.get('/reports', async (_q, res) => {
 });
 router.get('/settings', async (_q, res) => res.json(Object.fromEntries((await query('SELECT k,v FROM settings')).map((r) => [r.k, r.v]))));
 router.put('/settings', async (req, res) => {
-  const cur = String(req.body.currency || '').trim().toUpperCase();
-  if (!/^[A-Z]{3}$/.test(cur)) return bad(res, 'Enter a 3-letter currency code, e.g. BWP.');
-  await query("INSERT INTO settings (k,v) VALUES ('currency',?) ON DUPLICATE KEY UPDATE v=VALUES(v)", [cur]);
+  const b = req.body || {};
+  if (b.currency !== undefined) {
+    const cur = String(b.currency).trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(cur)) return bad(res, 'Enter a 3-letter currency code, e.g. BWP.');
+    await query("INSERT INTO settings (k,v) VALUES ('currency',?) ON DUPLICATE KEY UPDATE v=VALUES(v)", [cur]);
+  }
+  if (b.default_access_days !== undefined) {
+    const d = b.default_access_days === '' || b.default_access_days === null ? '' : Number(b.default_access_days);
+    if (d !== '' && !(Number.isInteger(d) && d > 0)) return bad(res, 'Access period must be a whole number of days.');
+    await query("INSERT INTO settings (k,v) VALUES ('default_access_days',?) ON DUPLICATE KEY UPDATE v=VALUES(v)", [String(d)]);
+  }
+  audit(req.user.id, 'admin_settings', b);
   res.json({ ok: true });
+});
+// Set the same access period on every existing product (affects future purchases only).
+router.post('/settings/apply-access', async (req, res) => {
+  const d = req.body.days === '' || req.body.days === null || req.body.days === undefined ? null : Number(req.body.days);
+  if (d !== null && !(Number.isInteger(d) && d > 0)) return bad(res, 'Access period must be a whole number of days.');
+  const r = await query('UPDATE products SET access_days=?', [d]);
+  audit(req.user.id, 'admin_apply_access', { days: d, changed: r.affectedRows });
+  res.json({ changed: r.affectedRows });
 });
 router.get('/audit', async (_q, res) => res.json(await query(
   `SELECT a.id, a.action, a.detail, a.created_at, u.email FROM audit_log a LEFT JOIN users u ON u.id=a.user_id

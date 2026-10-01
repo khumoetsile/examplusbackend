@@ -132,15 +132,16 @@ CREATE TABLE IF NOT EXISTS settings (
   v VARCHAR(255) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-INSERT IGNORE INTO settings (k, v) VALUES ('currency', 'BWP');
+INSERT IGNORE INTO settings (k, v) VALUES ('currency', 'BWP'), ('default_access_days', '');
 
 INSERT IGNORE INTO qualifications (id, code, name, description, sort_order) VALUES
- (1, 'BGCSE', 'BGCSE', 'Botswana General Certificate of Secondary Education', 1),
- (2, 'PSLE',  'PSLE',  'Primary School Leaving Examination', 2),
- (3, 'JC',    'JC',    'Junior Certificate', 3);
+ (1, 'BGCSE', 'BGCSE', 'Botswana General Certificate of Secondary Education', 2),
+ (2, 'PSLE',  'PSLE',  'Primary School Leaving Examination', 4),
+ (3, 'JC',    'JC',    'Junior Certificate', 3),
+ (4, 'IGCSE', 'IGCSE', 'International General Certificate of Secondary Education', 1);
 
 -- Sample subjects (edit from the admin area). The admin account is created by `npm run seed` in /backend.
 INSERT IGNORE INTO subjects (qualification_id, name) VALUES
- (1,'Biology'),(1,'Mathematics'),(1,'English Language'),
+ (1,'Biology'),(1,'Mathematics'),(1,'English Language'),(4,'Biology'),(4,'Mathematics'),(4,'English Language'),
  (2,'Mathematics'),(2,'English'),
  (3,'English'),(3,'Mathematics');
