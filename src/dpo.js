@@ -2,6 +2,8 @@ const { XMLParser } = require('fast-xml-parser');
 
 const parser = new XMLParser({ ignoreAttributes: true, parseTagValue: false });
 const live = () => !!process.env.DPO_COMPANY_TOKEN;
+// The mock gateway lets anyone "pay" for free, so it is refused on production unless explicitly allowed.
+const mockAllowed = () => process.env.NODE_ENV !== 'production' || process.env.ALLOW_MOCK_PAYMENTS === '1';
 
 // In-memory state for the built-in mock gateway (testing without DPO credentials).
 const mock = new Map();
@@ -21,6 +23,7 @@ async function call(xml) {
 // Returns { token, ref, payUrl } for an order.
 async function createToken({ order, description, appUrl }) {
   if (!live()) {
+    if (!mockAllowed()) throw new Error('DPO_COMPANY_TOKEN is not set: payments are disabled until DPO is configured.');
     const token = `MOCK-${order.id}-${Math.random().toString(36).slice(2, 10)}`;
     mock.set(token, 'pending');
     return { token, ref: token, payUrl: `${appUrl}/api/payments/mock?token=${token}` };
@@ -59,4 +62,4 @@ async function verifyToken(token) {
 
 const setMock = (token, status) => { if (mock.has(token)) mock.set(token, status); };
 
-module.exports = { live, createToken, verifyToken, setMock };
+module.exports = { live, mockAllowed, createToken, verifyToken, setMock };

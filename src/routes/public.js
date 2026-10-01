@@ -205,7 +205,7 @@ router.get('/orders/:id', requireAuth, async (req, res) => {
 
 // Built-in mock gateway, only active when no DPO company token is configured.
 router.get('/payments/mock', (req, res) => {
-  if (dpo.live()) return res.status(404).end();
+  if (dpo.live() || !dpo.mockAllowed()) return res.status(404).end();
   const t = encodeURIComponent(String(req.query.token || ''));
   res.type('html').send(`<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
 <body style="font-family:sans-serif;max-width:420px;margin:15vh auto;text-align:center">
@@ -214,7 +214,7 @@ router.get('/payments/mock', (req, res) => {
 <a href="/api/payments/mock/result?token=${t}&outcome=cancelled" style="display:inline-block;padding:12px 24px;background:#6b7280;color:#fff;border-radius:8px;text-decoration:none;margin-left:8px">Cancel</a></body>`);
 });
 router.get('/payments/mock/result', (req, res) => {
-  if (dpo.live()) return res.status(404).end();
+  if (dpo.live() || !dpo.mockAllowed()) return res.status(404).end();
   const token = String(req.query.token || '');
   dpo.setMock(token, req.query.outcome === 'paid' ? 'paid' : 'cancelled');
   res.redirect(`/api/payments/return?TransactionToken=${encodeURIComponent(token)}`);
