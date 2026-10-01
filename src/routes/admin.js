@@ -76,7 +76,7 @@ router.delete('/subjects/:id', async (req, res) => {
 // ---------- Papers ----------
 const uploadMany = upload.array('files', 40);
 const isPdf = (p) => { const b = Buffer.alloc(5); const fd = fs.openSync(p, 'r'); fs.readSync(fd, b, 0, 5, 0); fs.closeSync(fd); return b.toString() === '%PDF-'; };
-const nameFromFile = (n) => n.replace(/\.pdf$/i, '').replace(/[_-]+/g, ' ').trim();
+const nameFromFile = (n) => n.replace(/\.pdf$/i, '').replace(/[_+-]+/g, ' ').trim();
 
 router.get('/papers', async (_q, res) => res.json(await query(
   `SELECT p.id, p.subject_id, p.exam_year, p.paper_type, p.original_name, p.active, p.created_at,
